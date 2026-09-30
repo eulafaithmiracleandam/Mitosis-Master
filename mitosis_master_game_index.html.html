@@ -1,0 +1,1505 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mitosis Master: Cell Division Explorer (Online & Offline Edition)</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <!-- Canvas Confetti Library (Optional online enhancement) -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Nunito', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: radial-gradient(circle at top, #0f172a 0%, #020617 100%);
+            color: #f8fafc;
+            min-height: 100vh;
+        }
+
+        h1, h2, h3, h4, .font-heading {
+            font-family: 'Fredoka', cursive, sans-serif;
+        }
+
+        .glass-card {
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .glass-card-light {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(12px);
+        }
+
+        .drop-zone {
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .drop-zone.drag-over {
+            background: rgba(99, 102, 241, 0.25);
+            border-color: #818cf8 !important;
+            transform: scale(1.02);
+        }
+
+        .draggable-card {
+            cursor: grab;
+            user-select: none;
+            touch-action: manipulation;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+
+        .draggable-card:active {
+            cursor: grabbing;
+            transform: scale(0.98);
+        }
+
+        .draggable-card.dragging {
+            opacity: 0.4;
+        }
+
+        /* Toast animation */
+        @keyframes toastIn {
+            from { transform: translateY(100%) scale(0.9); opacity: 0; }
+            to { transform: translateY(0) scale(1); opacity: 1; }
+        }
+        .toast-animate {
+            animation: toastIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #090d16;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569;
+        }
+
+        @media print {
+            body {
+                background: white !important;
+                color: black !important;
+            }
+            .no-print {
+                display: none !important;
+            }
+            .print-only {
+                display: block !important;
+            }
+        }
+    </style>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'mitosis-master-game';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "demo-api-key",
+            authDomain: "demo-app.firebaseapp.com",
+            projectId: "demo-app",
+            storageBucket: "demo-app.appspot.com",
+            messagingSenderId: "123456789",
+            appId: "1:123456789:web:demo"
+        };
+
+        let app = null;
+        let auth = null;
+        let db = null;
+        let currentUser = null;
+
+        // Initialize Auth and Online Syncing
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Read URL parameters for room challenge
+            const urlParams = new URLSearchParams(window.location.search);
+            window.roomId = urlParams.get('room') || localStorage.getItem('mitosis_last_room') || 'global';
+            
+            updateRoomUI(window.roomId);
+
+            if (navigator.onLine) {
+                try {
+                    app = initializeApp(firebaseConfig);
+                    auth = getAuth(app);
+                    db = getFirestore(app);
+
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        const userCredential = await signInWithCustomToken(auth, __initial_auth_token);
+                        currentUser = userCredential.user;
+                    } else {
+                        const userCredential = await signInAnonymously(auth);
+                        currentUser = userCredential.user;
+                    }
+                    
+                    window.isFirebaseConnected = true;
+                    updateNetworkBadge(true);
+                    initLeaderboardListener();
+                } catch (err) {
+                    console.warn("Online mode unavailable, switching to local offline mode:", err);
+                    window.isFirebaseConnected = false;
+                    updateNetworkBadge(false);
+                    if (typeof window.renderLocalLeaderboard === 'function') {
+                        window.renderLocalLeaderboard();
+                    }
+                }
+            } else {
+                window.isFirebaseConnected = false;
+                updateNetworkBadge(false);
+                if (typeof window.renderLocalLeaderboard === 'function') {
+                    window.renderLocalLeaderboard();
+                }
+            }
+        });
+
+        function initLeaderboardListener() {
+            if (!currentUser || !db) return;
+            
+            const scoresRef = collection(db, 'artifacts', appId, 'public', 'data', 'scores');
+
+            onSnapshot(scoresRef, (snapshot) => {
+                const scoresList = [];
+                snapshot.forEach(doc => {
+                    scoresList.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Save synced scores locally as backup
+                localStorage.setItem('mitosis_cached_cloud_scores', JSON.stringify(scoresList));
+
+                const filteredScores = scoresList
+                    .filter(s => (s.roomId || 'global') === window.roomId)
+                    .sort((a, b) => (b.score || 0) - (a.score || 0))
+                    .slice(0, 15);
+
+                if (typeof window.renderLeaderboardUI === 'function') {
+                    window.renderLeaderboardUI(filteredScores, true);
+                }
+            }, (error) => {
+                console.warn("Firestore error, falling back to local leaderboard:", error);
+                window.isFirebaseConnected = false;
+                updateNetworkBadge(false);
+                if (typeof window.renderLocalLeaderboard === 'function') {
+                    window.renderLocalLeaderboard();
+                }
+            });
+        }
+
+        // Global save score function (works both online and offline)
+        window.savePlayerScore = async function(playerName, score) {
+            // Always save locally first!
+            const localScores = JSON.parse(localStorage.getItem('mitosis_local_scores') || '[]');
+            const existingIdx = localScores.findIndex(s => s.playerName === playerName && s.roomId === window.roomId);
+            
+            const scoreRecord = {
+                playerName: playerName || 'Cell Explorer',
+                score: score,
+                roomId: window.roomId || 'global',
+                updatedAt: new Date().toISOString()
+            };
+
+            if (existingIdx !== -1) {
+                if (score > localScores[existingIdx].score) {
+                    localScores[existingIdx] = scoreRecord;
+                }
+            } else {
+                localScores.push(scoreRecord);
+            }
+            localStorage.setItem('mitosis_local_scores', JSON.stringify(localScores));
+
+            // Sync to Firebase if connected
+            if (window.isFirebaseConnected && currentUser && db) {
+                try {
+                    const userDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'scores', currentUser.uid);
+                    await setDoc(userDocRef, scoreRecord, { merge: true });
+                } catch (e) {
+                    console.warn("Failed to sync score online:", e);
+                }
+            } else {
+                if (typeof window.renderLocalLeaderboard === 'function') {
+                    window.renderLocalLeaderboard();
+                }
+            }
+        };
+
+        function updateRoomUI(code) {
+            const roomBanner = document.getElementById('room-info-banner');
+            const roomCodeDisplay = document.getElementById('room-code-display');
+            if (code && code !== 'global') {
+                if (roomBanner) roomBanner.classList.remove('hidden');
+                if (roomCodeDisplay) roomCodeDisplay.innerText = code;
+            } else {
+                if (roomBanner) roomBanner.classList.add('hidden');
+            }
+        }
+
+        function updateNetworkBadge(isOnline) {
+            const badge = document.getElementById('network-status-badge');
+            if (!badge) return;
+            if (isOnline) {
+                badge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Online Mode`;
+            } else {
+                badge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> Offline / Local Mode`;
+            }
+        }
+
+        // Listen to browser network changes
+        window.addEventListener('online', () => {
+            updateNetworkBadge(true);
+            window.showToast("🌐 Internet connection restored!", "success");
+        });
+        window.addEventListener('offline', () => {
+            window.isFirebaseConnected = false;
+            updateNetworkBadge(false);
+            window.showToast("📡 Switched to Offline Mode. Your progress will save locally!", "info");
+        });
+    </script>
+</head>
+<body class="flex flex-col min-h-screen antialiased selection:bg-indigo-500 selection:text-white">
+
+    <header class="border-b border-slate-800 bg-slate-950/80 backdrop-blur-md sticky top-0 z-40 no-print">
+        <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
+            
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/30 text-white font-bold text-xl">
+                    🧬
+                </div>
+                <div>
+                    <h1 class="text-xl md:text-2xl font-extrabold text-white tracking-wide">Mitosis Master</h1>
+                    <div class="flex items-center gap-2">
+                        <p class="text-xs text-indigo-300 font-semibold">Grade 7 Cell & Life Science</p>
+                        <!-- Network Mode Badge -->
+                        <div id="network-status-badge" class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                            <span class="w-2 h-2 rounded-full bg-slate-500"></span> Detecting Mode...
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stats & Sharing Bar -->
+            <div class="flex items-center gap-2 md:gap-3 bg-slate-900/80 px-3 py-1.5 rounded-2xl border border-slate-700/60">
+                <div class="flex items-center gap-1.5 px-2 py-1" title="Current Score">
+                    <i class="fa-solid fa-star text-amber-400 text-sm"></i>
+                    <span id="stat-score" class="font-bold text-sm md:text-base text-amber-300">0</span>
+                </div>
+                <div class="h-4 w-px bg-slate-700"></div>
+                <div class="flex items-center gap-1.5 px-2 py-1" title="Streak Bonus">
+                    <i class="fa-solid fa-fire text-orange-500 text-sm"></i>
+                    <span id="stat-streak" class="font-bold text-sm md:text-base text-orange-400">0</span>
+                </div>
+                <div class="h-4 w-px bg-slate-700"></div>
+                
+                <!-- Share & Classroom Tools Button -->
+                <button onclick="openModal('share-modal')" class="text-emerald-300 hover:text-white transition-colors flex items-center gap-1.5 text-xs font-bold bg-emerald-600/30 hover:bg-emerald-600/50 px-3 py-1.5 rounded-xl border border-emerald-500/30 shadow-sm">
+                    <i class="fa-solid fa-share-nodes"></i>
+                    <span class="hidden sm:inline">Share / Class Tools</span>
+                </button>
+                
+                <!-- Guide Modal Button -->
+                <button onclick="openModal('info-modal')" class="text-indigo-300 hover:text-white transition-colors flex items-center gap-1 text-xs font-bold bg-indigo-600/30 hover:bg-indigo-600/50 px-2.5 py-1.5 rounded-xl border border-indigo-500/30">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span class="hidden sm:inline">Guide</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <div id="room-info-banner" class="hidden max-w-7xl mx-auto w-full px-4 pt-3 no-print">
+        <div class="bg-indigo-900/50 border border-indigo-500/40 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs md:text-sm text-indigo-200">
+            <span class="flex items-center gap-2">
+                <i class="fa-solid fa-users-viewfinder text-indigo-400 text-base"></i>
+                <span>Active Class Room Code: <strong id="room-code-display" class="text-amber-300 font-mono text-sm bg-indigo-950 px-2 py-0.5 rounded border border-indigo-700"></strong></span>
+            </span>
+            <button onclick="leaveRoom()" class="text-xs text-rose-300 hover:text-rose-100 font-bold bg-rose-950/60 hover:bg-rose-900/80 px-3 py-1 rounded-xl border border-rose-800 transition-colors">
+                <i class="fa-solid fa-right-from-bracket mr-1"></i> Exit Room
+            </button>
+        </div>
+    </div>
+
+    <div class="max-w-7xl mx-auto w-full px-4 pt-4 pb-2 no-print">
+        <div class="flex flex-wrap gap-2 p-1.5 bg-slate-900/80 rounded-2xl border border-slate-800">
+            <button onclick="switchTab('sorter')" id="tab-btn-sorter" class="tab-btn flex-1 min-w-[120px] py-2.5 px-3 rounded-xl font-bold text-xs md:text-sm flex items-center justify-center gap-2 transition-all bg-indigo-600 text-white shadow-lg shadow-indigo-600/30">
+                <i class="fa-solid fa-cubes-stacked"></i>
+                <span>1. Stage Sorter</span>
+            </button>
+            <button onclick="switchTab('explorer')" id="tab-btn-explorer" class="tab-btn flex-1 min-w-[120px] py-2.5 px-3 rounded-xl font-bold text-xs md:text-sm flex items-center justify-center gap-2 transition-all text-slate-400 hover:text-slate-200 hover:bg-slate-800/50">
+                <i class="fa-solid fa-microscope"></i>
+                <span>2. Visual Quiz</span>
+            </button>
+            <button onclick="switchTab('sequence')" id="tab-btn-sequence" class="tab-btn flex-1 min-w-[120px] py-2.5 px-3 rounded-xl font-bold text-xs md:text-sm flex items-center justify-center gap-2 transition-all text-slate-400 hover:text-slate-200 hover:bg-slate-800/50">
+                <i class="fa-solid fa-arrow-down-1-9"></i>
+                <span>3. Sequence</span>
+            </button>
+            <button onclick="switchTab('leaderboard')" id="tab-btn-leaderboard" class="tab-btn flex-1 min-w-[120px] py-2.5 px-3 rounded-xl font-bold text-xs md:text-sm flex items-center justify-center gap-2 transition-all text-slate-400 hover:text-slate-200 hover:bg-slate-800/50">
+                <i class="fa-solid fa-trophy text-amber-400"></i>
+                <span>Leaderboard</span>
+            </button>
+        </div>
+    </div>
+
+    <main class="max-w-7xl mx-auto w-full px-4 py-4 flex-1 flex flex-col no-print">
+
+        <!-- TAB 1: STAGE SORTER -->
+        <section id="tab-sorter" class="tab-content flex-1 flex flex-col gap-6">
+            <div class="glass-card p-5 rounded-3xl border border-slate-700/50">
+                <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-4">
+                    <div>
+                        <h2 class="text-xl md:text-2xl font-bold text-indigo-200 flex items-center gap-2">
+                            <i class="fa-solid fa-hand-pointer text-indigo-400"></i> Stage Event Sorter
+                        </h2>
+                        <p class="text-xs md:text-sm text-slate-300">Drag or tap each event card to place it into the correct stage bucket of the cell cycle!</p>
+                    </div>
+                    <button onclick="resetSorterGame()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-semibold text-xs md:text-sm transition-all border border-slate-600 flex items-center gap-2">
+                        <i class="fa-solid fa-rotate-right"></i> Reset Cards
+                    </button>
+                </div>
+
+                <!-- Event Cards Source Pool -->
+                <div class="mb-6 p-4 bg-slate-900/90 rounded-2xl border border-slate-700/80">
+                    <div class="flex items-center justify-between mb-3">
+                        <span class="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-2">
+                            <i class="fa-solid fa-layer-group"></i> Unsorted Events (<span id="cards-left-count">0</span> Remaining)
+                        </span>
+                        <span class="text-xs text-slate-400">Drag or click a card to sort</span>
+                    </div>
+                    <div id="cards-pool" class="flex flex-wrap gap-3 min-h-[90px] p-2 bg-slate-950/50 rounded-xl border border-dashed border-slate-800 items-center justify-center">
+                        <!-- Cards injected via JS -->
+                    </div>
+                </div>
+
+                <!-- Stage Drop Buckets Grid -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                    <!-- Interphase -->
+                    <div data-stage="Interphase" class="drop-zone glass-card p-4 rounded-2xl border-2 border-sky-500/30 flex flex-col min-h-[220px]">
+                        <div class="flex items-center justify-between pb-2 mb-2 border-b border-sky-500/20">
+                            <h3 class="font-bold text-sky-300 text-lg flex items-center gap-2">
+                                <span class="w-3 h-3 rounded-full bg-sky-400"></span> Interphase
+                            </h3>
+                            <i class="fa-solid fa-circle-notch text-sky-400/50"></i>
+                        </div>
+                        <p class="text-[11px] text-slate-400 mb-3 italic">Cell growth & DNA copy</p>
+                        <div class="bucket-cards flex-1 flex flex-col gap-2 p-1"></div>
+                    </div>
+
+                    <!-- Prophase -->
+                    <div data-stage="Prophase" class="drop-zone glass-card p-4 rounded-2xl border-2 border-purple-500/30 flex flex-col min-h-[220px]">
+                        <div class="flex items-center justify-between pb-2 mb-2 border-b border-purple-500/20">
+                            <h3 class="font-bold text-purple-300 text-lg flex items-center gap-2">
+                                <span class="w-3 h-3 rounded-full bg-purple-400"></span> Prophase
+                            </h3>
+                            <i class="fa-solid fa-compress text-purple-400/50"></i>
+                        </div>
+                        <p class="text-[11px] text-slate-400 mb-3 italic">Chromosomes condense</p>
+                        <div class="bucket-cards flex-1 flex flex-col gap-2 p-1"></div>
+                    </div>
+
+                    <!-- Metaphase -->
+                    <div data-stage="Metaphase" class="drop-zone glass-card p-4 rounded-2xl border-2 border-pink-500/30 flex flex-col min-h-[220px]">
+                        <div class="flex items-center justify-between pb-2 mb-2 border-b border-pink-500/20">
+                            <h3 class="font-bold text-pink-300 text-lg flex items-center gap-2">
+                                <span class="w-3 h-3 rounded-full bg-pink-400"></span> Metaphase
+                            </h3>
+                            <i class="fa-solid fa-arrows-left-right-to-line text-pink-400/50"></i>
+                        </div>
+                        <p class="text-[11px] text-slate-400 mb-3 italic">Align in the Middle</p>
+                        <div class="bucket-cards flex-1 flex flex-col gap-2 p-1"></div>
+                    </div>
+
+                    <!-- Anaphase -->
+                    <div data-stage="Anaphase" class="drop-zone glass-card p-4 rounded-2xl border-2 border-amber-500/30 flex flex-col min-h-[220px]">
+                        <div class="flex items-center justify-between pb-2 mb-2 border-b border-amber-500/20">
+                            <h3 class="font-bold text-amber-300 text-lg flex items-center gap-2">
+                                <span class="w-3 h-3 rounded-full bg-amber-400"></span> Anaphase
+                            </h3>
+                            <i class="fa-solid fa-arrows-split-up-and-left text-amber-400/50"></i>
+                        </div>
+                        <p class="text-[11px] text-slate-400 mb-3 italic">Pulled Apart to poles</p>
+                        <div class="bucket-cards flex-1 flex flex-col gap-2 p-1"></div>
+                    </div>
+
+                    <!-- Telophase -->
+                    <div data-stage="Telophase" class="drop-zone glass-card p-4 rounded-2xl border-2 border-emerald-500/30 flex flex-col min-h-[220px]">
+                        <div class="flex items-center justify-between pb-2 mb-2 border-b border-emerald-500/20">
+                            <h3 class="font-bold text-emerald-300 text-lg flex items-center gap-2">
+                                <span class="w-3 h-3 rounded-full bg-emerald-400"></span> Telophase
+                            </h3>
+                            <i class="fa-solid fa-clone text-emerald-400/50"></i>
+                        </div>
+                        <p class="text-[11px] text-slate-400 mb-3 italic">Two nuclei & division</p>
+                        <div class="bucket-cards flex-1 flex flex-col gap-2 p-1"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 2: CELL VISUAL QUIZ -->
+        <section id="tab-explorer" class="tab-content hidden flex-1 flex flex-col gap-6">
+            <div class="glass-card p-6 rounded-3xl border border-slate-700/50">
+                <div class="max-w-4xl mx-auto flex flex-col gap-6">
+                    
+                    <div class="flex items-center justify-between border-b border-slate-700/60 pb-4">
+                        <div>
+                            <h2 class="text-2xl font-bold text-indigo-200">Cell Visual Quiz Explorer</h2>
+                            <p class="text-xs md:text-sm text-slate-300">Observe the microscopic cell diagram and identify the active phase!</p>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-xs uppercase font-bold text-indigo-400">Question</span>
+                            <div class="text-xl font-bold text-white"><span id="quiz-curr-q">1</span> / <span id="quiz-total-q">5</span></div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+                        <!-- Animated Cell SVG Graphic -->
+                        <div class="bg-slate-950 p-6 rounded-3xl border border-indigo-500/30 flex flex-col items-center justify-center min-h-[280px] shadow-inner relative overflow-hidden">
+                            <div id="cell-svg-display" class="w-full max-w-[240px] h-[240px] relative flex items-center justify-center">
+                                <!-- SVG injected dynamically -->
+                            </div>
+                            
+                            <span class="mt-2 text-xs font-semibold text-slate-400 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-800">
+                                <i class="fa-solid fa-microscope text-indigo-400 mr-1"></i> Live Cell Microscopic View
+                            </span>
+                        </div>
+
+                        <!-- Quiz Options -->
+                        <div class="flex flex-col gap-4">
+                            <div class="bg-slate-900/70 p-4 rounded-2xl border border-slate-700">
+                                <h3 id="quiz-question-text" class="text-base md:text-lg font-bold text-indigo-100">
+                                    Which stage of cell division is displayed in the viewer?
+                                </h3>
+                            </div>
+
+                            <div id="quiz-options-container" class="flex flex-col gap-3">
+                                <!-- Options dynamically rendered -->
+                            </div>
+
+                            <div id="quiz-feedback" class="hidden p-4 rounded-2xl text-xs md:text-sm font-semibold border flex items-center gap-3">
+                                <i id="quiz-feedback-icon" class="text-xl"></i>
+                                <span id="quiz-feedback-msg"></span>
+                            </div>
+
+                            <button id="quiz-next-btn" onclick="nextQuizQuestion()" class="hidden w-full py-3 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-2xl transition-all shadow-lg shadow-indigo-500/25 flex items-center justify-center gap-2">
+                                <span>Next Question</span>
+                                <i class="fa-solid fa-arrow-right"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 3: MITOSIS SEQUENCE CHALLENGE -->
+        <section id="tab-sequence" class="tab-content hidden flex-1 flex flex-col gap-6">
+            <div class="glass-card p-6 rounded-3xl border border-slate-700/50">
+                <div class="max-w-4xl mx-auto flex flex-col gap-6">
+                    
+                    <div class="text-center max-w-2xl mx-auto">
+                        <h2 class="text-2xl font-bold text-indigo-200 mb-1">Chronological Sequence Challenge</h2>
+                        <p class="text-xs md:text-sm text-slate-300">Arrange all stages in the exact order they occur in nature to build a healthy growing organism!</p>
+                    </div>
+
+                    <!-- Sequence Target Slots -->
+                    <div id="sequence-slots" class="grid grid-cols-1 sm:grid-cols-5 gap-3 my-2">
+                        <!-- 5 slots generated by JS -->
+                    </div>
+
+                    <!-- Options Pool -->
+                    <div class="p-5 bg-slate-900/80 rounded-2xl border border-slate-700/70">
+                        <h4 class="text-xs font-bold uppercase tracking-wider text-indigo-300 mb-3">Available Phases (Click to add into empty slots):</h4>
+                        <div id="sequence-pool" class="flex flex-wrap gap-3 justify-center min-h-[60px]">
+                            <!-- Stage blocks -->
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-center gap-4">
+                        <button onclick="checkSequence()" class="px-6 md:px-8 py-3 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-bold rounded-2xl transition-all shadow-lg shadow-emerald-500/25 flex items-center gap-2 text-sm md:text-base">
+                            <i class="fa-solid fa-check-circle"></i>
+                            <span>Verify Sequence</span>
+                        </button>
+                        <button onclick="resetSequence()" class="px-4 md:px-5 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-2xl transition-all border border-slate-700 text-xs md:text-sm">
+                            Reset Order
+                        </button>
+                    </div>
+
+                    <!-- Organism Growth Visual Progress -->
+                    <div class="mt-2 p-5 bg-slate-950/60 rounded-2xl border border-slate-800 flex flex-col items-center justify-center text-center">
+                        <h4 class="text-xs font-bold uppercase text-slate-400 mb-2">Organismal Growth Builder</h4>
+                        <div class="flex items-center justify-center gap-3 md:gap-4 text-2xl md:text-3xl my-2" id="organism-growth-icons">
+                            <span class="opacity-30 transition-all duration-500" id="org-stage-1" title="Zygote Single Cell">🧫</span>
+                            <i class="fa-solid fa-arrow-right text-xs text-slate-600"></i>
+                            <span class="opacity-30 transition-all duration-500" id="org-stage-2" title="Cell Division">🫧</span>
+                            <i class="fa-solid fa-arrow-right text-xs text-slate-600"></i>
+                            <span class="opacity-30 transition-all duration-500" id="org-stage-3" title="Tissue Formation">🧬</span>
+                            <i class="fa-solid fa-arrow-right text-xs text-slate-600"></i>
+                            <span class="opacity-30 transition-all duration-500" id="org-stage-4" title="Organ Development">🫀</span>
+                            <i class="fa-solid fa-arrow-right text-xs text-slate-600"></i>
+                            <span class="opacity-30 transition-all duration-500" id="org-stage-5" title="Fully Grown Organism">🧍</span>
+                        </div>
+                        <p id="organism-status-msg" class="text-xs text-slate-400">Complete the sequence correctly to grow from a single cell to a full organism!</p>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 4: LEADERBOARD & STUDENT PROGRESS -->
+        <section id="tab-leaderboard" class="tab-content hidden flex-1 flex flex-col gap-6">
+            <div class="glass-card p-6 rounded-3xl border border-slate-700/50 max-w-3xl mx-auto w-full">
+                <div class="flex flex-wrap items-center justify-between border-b border-slate-700 pb-4 mb-4 gap-3">
+                    <div>
+                        <h2 class="text-2xl font-bold text-amber-300 flex items-center gap-2">
+                            <i class="fa-solid fa-trophy"></i> Cell Master Leaderboard
+                        </h2>
+                        <p class="text-xs md:text-sm text-slate-300">Tracks both Online Cloud and Local Classroom scores!</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="promptPlayerName()" class="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl transition-all shadow-md">
+                            <i class="fa-solid fa-user-pen mr-1"></i> Edit Name
+                        </button>
+                        <button onclick="exportStudentCertificate()" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-all shadow-md">
+                            <i class="fa-solid fa-file-pdf mr-1"></i> Score Certificate
+                        </button>
+                    </div>
+                </div>
+
+                <div id="leaderboard-list" class="space-y-2">
+                    <div class="p-6 text-center text-slate-400 text-sm">
+                        <i class="fa-solid fa-spinner animate-spin mr-2"></i> Loading leaderboard data...
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- SHARE & CLASSROOM TOOLS MODAL -->
+    <div id="share-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 hidden no-print">
+        <div class="glass-card-light w-full max-w-2xl rounded-3xl p-6 md:p-8 shadow-2xl relative max-h-[90vh] overflow-y-auto text-slate-800">
+            <button onclick="closeModal('share-modal')" class="absolute top-5 right-5 w-8 h-8 rounded-full bg-slate-200 hover:bg-slate-300 text-slate-700 flex items-center justify-center font-bold text-lg">
+                &times;
+            </button>
+
+            <div class="flex items-center gap-3 mb-6">
+                <div class="w-12 h-12 rounded-2xl bg-emerald-600 text-white flex items-center justify-center text-2xl shadow-lg shadow-emerald-600/30">
+                    <i class="fa-solid fa-chalkboard-user"></i>
+                </div>
+                <div>
+                    <h3 class="text-2xl font-bold text-slate-800">Share & Classroom Tools</h3>
+                    <p class="text-xs md:text-sm text-slate-600">Easily play Online with your class or Offline without internet!</p>
+                </div>
+            </div>
+
+            <!-- Two Sharing Options Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                <!-- Option 1: Online Link & QR Code -->
+                <div class="p-4 bg-emerald-50 rounded-2xl border border-emerald-200 flex flex-col justify-between">
+                    <div>
+                        <span class="text-xs font-bold uppercase tracking-wider text-emerald-800 flex items-center gap-1.5 mb-2">
+                            <i class="fa-solid fa-wifi text-emerald-600"></i> 1. Online Class Room / QR Code
+                        </span>
+                        <p class="text-xs text-slate-600 mb-3">Students can scan this QR code or use the link to join your specific class leaderboard!</p>
+                        
+                        <!-- Dynamic SVG QR Code Container -->
+                        <div id="qr-code-container" class="bg-white p-3 rounded-xl border border-slate-300 flex items-center justify-center min-h-[140px] mb-3">
+                            <!-- SVG QR Code rendered via JS -->
+                        </div>
+
+                        <div class="space-y-1.5">
+                            <label class="text-[11px] font-bold text-slate-600">Set Custom Room Code:</label>
+                            <div class="flex gap-1.5">
+                                <input id="custom-room-input" type="text" placeholder="e.g. PERIOD-2" class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-slate-800 text-xs font-mono">
+                                <button onclick="setCustomRoomCode()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg flex-shrink-0">
+                                    Set
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button onclick="copyShareUrl()" class="mt-4 w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 shadow-sm">
+                        <i class="fa-solid fa-copy"></i>
+                        <span>Copy Shareable Game Link</span>
+                    </button>
+                </div>
+
+                <!-- Option 2: Offline Standalone File & Score Export -->
+                <div class="p-4 bg-indigo-50 rounded-2xl border border-indigo-200 flex flex-col justify-between">
+                    <div>
+                        <span class="text-xs font-bold uppercase tracking-wider text-indigo-800 flex items-center gap-1.5 mb-2">
+                            <i class="fa-solid fa-download text-indigo-600"></i> 2. Offline Mode Distribution
+                        </span>
+                        <p class="text-xs text-slate-600 mb-3">No internet in class? Download this standalone single file to distribute via USB or email!</p>
+
+                        <div class="space-y-2 mb-4">
+                            <div class="p-2.5 bg-white rounded-xl border border-slate-200 text-xs text-slate-700">
+                                <strong class="block text-indigo-900 mb-0.5">📂 Standalone Offline HTML File</strong>
+                                Works on any laptop, Chromebook, or tablet without needing Wi-Fi or web servers.
+                            </div>
+                            <div class="p-2.5 bg-white rounded-xl border border-slate-200 text-xs text-slate-700">
+                                <strong class="block text-indigo-900 mb-0.5">📊 Student Results CSV Export</strong>
+                                Collect student score files offline and export class summary sheets.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <button onclick="downloadGameFile()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 shadow-sm">
+                            <i class="fa-solid fa-file-arrow-down"></i>
+                            <span>Download Standalone .HTML File</span>
+                        </button>
+                        <button onclick="exportClassResultsCSV()" class="w-full py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-file-csv"></i>
+                            <span>Export Class Results CSV</span>
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="mt-6 pt-4 border-t border-slate-200 flex justify-end">
+                <button onclick="closeModal('share-modal')" class="px-5 py-2 bg-slate-800 text-white font-bold text-xs rounded-xl">
+                    Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- EDUCATIONAL GUIDE MODAL -->
+    <div id="info-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 hidden no-print">
+        <div class="glass-card-light w-full max-w-3xl rounded-3xl p-6 md:p-8 max-h-[90vh] overflow-y-auto shadow-2xl relative text-slate-800">
+            <button onclick="closeModal('info-modal')" class="absolute top-5 right-5 w-10 h-10 rounded-full bg-slate-200 hover:bg-slate-300 text-slate-700 flex items-center justify-center font-bold text-lg transition-colors">
+                &times;
+            </button>
+
+            <div class="flex items-center gap-3 mb-6">
+                <div class="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center text-2xl shadow-lg shadow-indigo-600/30">
+                    <i class="fa-solid fa-book-open"></i>
+                </div>
+                <div>
+                    <h3 class="text-2xl font-bold text-slate-800">Grade 7 Cell Division & Genetics Guide</h3>
+                    <p class="text-xs md:text-sm text-slate-600">Cell Cycle, Chromosome Structures & Mitosis vs. Meiosis</p>
+                </div>
+            </div>
+
+            <div class="space-y-5 text-xs md:text-sm">
+                
+                <div class="p-4 rounded-2xl bg-indigo-50 border border-indigo-100">
+                    <h4 class="font-bold text-indigo-900 text-base mb-2 flex items-center gap-2">
+                        <i class="fa-solid fa-arrows-spin text-indigo-600"></i> The Complete Cell Cycle (Interphase + M-Phase)
+                    </h4>
+                    <ul class="list-disc list-inside space-y-1 text-slate-700">
+                        <li><strong>Interphase (90% of cell life):</strong> 
+                            <ul class="list-circle list-inside ml-4 text-xs text-slate-600">
+                                <li><strong>G1 Phase (First Gap):</strong> Cell grows larger and synthesizes organelles.</li>
+                                <li><strong>S Phase (Synthesis):</strong> DNA replication creates two identical copies of each chromosome.</li>
+                                <li><strong>G2 Phase (Second Gap):</strong> Final growth and preparation for division.</li>
+                            </ul>
+                        </li>
+                        <li><strong>M-Phase (Mitosis & Cytokinesis):</strong> Nuclear division ($PMAT$) followed by cytoplasm division.</li>
+                    </ul>
+                </div>
+
+                <div class="p-4 rounded-2xl bg-sky-50 border border-sky-100">
+                    <h4 class="font-bold text-sky-900 text-base mb-2 flex items-center gap-2">
+                        <i class="fa-solid fa-dna text-sky-600"></i> Chromosome Terminology
+                    </h4>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-center mt-2">
+                        <div class="p-3 bg-white rounded-xl shadow-sm border border-sky-100">
+                            <span class="block font-bold text-sky-700 text-sm">Chromatin</span>
+                            <span class="text-[11px] text-slate-600">Loose, uncoiled DNA during Interphase.</span>
+                        </div>
+                        <div class="p-3 bg-white rounded-xl shadow-sm border border-sky-100">
+                            <span class="block font-bold text-sky-700 text-sm">Sister Chromatids</span>
+                            <span class="text-[11px] text-slate-600">Two identical strands of a duplicated chromosome.</span>
+                        </div>
+                        <div class="p-3 bg-white rounded-xl shadow-sm border border-sky-100">
+                            <span class="block font-bold text-sky-700 text-sm">Centromere</span>
+                            <span class="text-[11px] text-slate-600">The region connecting sister chromatids together.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-4 rounded-2xl bg-purple-50 border border-purple-100">
+                    <h4 class="font-bold text-purple-900 text-base mb-2 flex items-center gap-2">
+                        <i class="fa-solid fa-code-compare text-purple-600"></i> Mitosis vs. Meiosis Comparison
+                    </h4>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-xs text-slate-700 border-collapse">
+                            <thead>
+                                <tr class="border-b border-purple-200 text-purple-900 font-bold">
+                                    <th class="py-1 px-2">Feature</th>
+                                    <th class="py-1 px-2">Mitosis</th>
+                                    <th class="py-1 px-2">Meiosis</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-purple-100">
+                                <tr>
+                                    <td class="py-1 px-2 font-semibold">Purpose</td>
+                                    <td class="py-1 px-2">Growth, Repair, Asexual Reproduction</td>
+                                    <td class="py-1 px-2">Gamete (Sex Cell) Production</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-1 px-2 font-semibold">Daughter Cells</td>
+                                    <td class="py-1 px-2">2 Genetically Identical Cells</td>
+                                    <td class="py-1 px-2">4 Genetically Unique Cells</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-1 px-2 font-semibold">Chromosome Count</td>
+                                    <td class="py-1 px-2">Diploid ($2n$) - Full Set</td>
+                                    <td class="py-1 px-2">Haploid ($1n$) - Half Set</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="p-4 rounded-2xl bg-amber-50 border border-amber-100">
+                    <h4 class="font-bold text-amber-900 text-base mb-2 flex items-center gap-2">
+                        <i class="fa-solid fa-seedling text-amber-600"></i> Plant vs. Animal Cytokinesis
+                    </h4>
+                    <div class="space-y-1 text-slate-700 text-xs">
+                        <p><strong>Animal Cells:</strong> A <em>cleavage furrow</em> pinches the flexible cell membrane inward until it splits into two cells.</p>
+                        <p><strong>Plant Cells:</strong> Due to rigid cell walls, vesicles deposit cellulose along the middle to build a rigid <em>cell plate</em>, forming new cell walls.</p>
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="mt-6 pt-4 border-t border-slate-200 flex justify-end">
+                <button onclick="closeModal('info-modal')" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-colors text-sm">
+                    Got it! Back to Game
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PRINTABLE STUDENT CERTIFICATE (PRINT ONLY) -->
+    <div id="printable-certificate" class="hidden print-only p-8 max-w-2xl mx-auto border-4 border-indigo-600 rounded-3xl text-slate-900">
+        <div class="text-center space-y-4">
+            <h1 class="text-3xl font-extrabold text-indigo-900 uppercase tracking-widest">Certificate of Completion</h1>
+            <p class="text-sm text-slate-600">Grade 7 Science: Cell Cycle & Mitosis Mastery</p>
+            <hr class="border-indigo-200">
+            <p class="text-base">This certifies that Grade 7 Scholar</p>
+            <h2 id="cert-student-name" class="text-2xl font-bold text-indigo-700 underline">Cell Explorer</h2>
+            <p class="text-base">has successfully mastered the Grade 7 Cell Division Explorer with a score of:</p>
+            <div class="text-4xl font-black text-amber-600 my-4"><span id="cert-score">0</span> Points</div>
+            <p class="text-xs text-slate-500">Classroom Code: <span id="cert-room">global</span> | Date: <span id="cert-date"></span></p>
+        </div>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none no-print"></div>
+
+    <script>
+        /* --- GAME DATASETS (GRADE 7 SCIENCE ALIGNED) --- */
+        const sorterCardsData = [
+            { id: 1, stage: 'Interphase', icon: 'fa-dna', text: 'G1, S, G2 phases: DNA replicates as uncoiled chromatin' },
+            { id: 2, stage: 'Interphase', icon: 'fa-up-right-and-down-left-from-center', text: 'Cell grows, synthesizes proteins & duplicates centrosomes' },
+            { id: 3, stage: 'Prophase', icon: 'fa-compress', text: 'Chromatin condenses into sister chromatids joined at centromeres' },
+            { id: 4, stage: 'Prophase', icon: 'fa-eye-slash', text: 'Nuclear envelope dissolves; spindle fibers emerge from centrioles' },
+            { id: 5, stage: 'Metaphase', icon: 'fa-arrows-left-right-to-line', text: 'Chromosomes line up single-file along the metaphase plate (equator)' },
+            { id: 6, stage: 'Metaphase', icon: 'fa-grip-lines-vertical', text: 'Spindle fibers attach to chromosome centromeres' },
+            { id: 7, stage: 'Anaphase', icon: 'fa-arrows-split-up-and-left', text: 'Centromeres divide; sister chromatids separate into daughter chromosomes' },
+            { id: 8, stage: 'Telophase', icon: 'fa-clone', text: 'Two nuclear envelopes re-assemble around daughter chromosome sets' },
+            { id: 9, stage: 'Telophase', icon: 'fa-scissors', text: 'Cytokinesis: Cleavage furrow (animal) or cell plate (plant) forms' }
+        ];
+
+        const explorerQuizData = [
+            {
+                svgType: 'Interphase',
+                question: 'During this stage (G1, S, G2), the cell replicates its DNA and grows while chromatin remains loose and uncoiled. What phase is this?',
+                options: ['Interphase', 'Prophase', 'Anaphase', 'Telophase'],
+                correct: 0,
+                explanation: 'Interphase consists of G1 (growth), S (DNA replication), and G2 (preparation for division).'
+            },
+            {
+                svgType: 'Prophase',
+                question: 'Chromatin condenses into X-shaped sister chromatids connected at centromeres, and the nuclear envelope dissolves. Which stage is shown?',
+                options: ['Metaphase', 'Prophase', 'Telophase', 'Interphase'],
+                correct: 1,
+                explanation: 'In Prophase, DNA tightens into visible chromosomes so spindle fibers can move them safely.'
+            },
+            {
+                svgType: 'Metaphase',
+                question: 'Chromosomes align single-file along the cell equator (metaphase plate) attached to spindle fibers. Identify this phase:',
+                options: ['Anaphase', 'Prophase', 'Metaphase', 'Telophase'],
+                correct: 2,
+                explanation: 'Metaphase ensures each daughter cell receives an identical set of chromosomes when split.'
+            },
+            {
+                svgType: 'Anaphase',
+                question: 'Centromeres split and sister chromatids separate into individual daughter chromosomes moving toward opposite poles. What is this phase?',
+                options: ['Interphase', 'Anaphase', 'Metaphase', 'Prophase'],
+                correct: 1,
+                explanation: 'Anaphase separates sister chromatids so both sides receive equal diploid genetic information.'
+            },
+            {
+                svgType: 'Telophase',
+                question: 'Nuclear membranes reform around two identical nuclei while cytokinesis divides the cytoplasm (cleavage furrow in animals / cell plate in plants). Identify this stage:',
+                options: ['Telophase & Cytokinesis', 'Prophase', 'Metaphase', 'Anaphase'],
+                correct: 0,
+                explanation: 'Telophase & Cytokinesis complete cell division, yielding two genetically identical diploid (2n) daughter cells.'
+            }
+        ];
+
+        const correctSequence = ['Interphase', 'Prophase', 'Metaphase', 'Anaphase', 'Telophase'];
+
+        /* --- STATE VARIABLES --- */
+        let score = parseInt(localStorage.getItem('mitosis_saved_score') || '0', 10);
+        let streak = 0;
+        let playerName = localStorage.getItem('mitosis_player_name') || 'Cell Explorer';
+        let currentQuizIndex = 0;
+        let userSequence = [null, null, null, null, null];
+        let draggedCard = null;
+
+        window.renderLeaderboardUI = function(scores, isCloud = false) {
+            const container = document.getElementById('leaderboard-list');
+            if (!container) return;
+
+            if (!scores || scores.length === 0) {
+                container.innerHTML = `
+                    <div class="p-6 text-center text-slate-400 text-sm glass-card rounded-2xl">
+                        No score records found for room <strong class="text-amber-300 font-mono">${escapeHtml(window.roomId || 'global')}</strong>. Be the first to play!
+                    </div>`;
+                return;
+            }
+
+            container.innerHTML = scores.map((s, idx) => `
+                <div class="flex items-center justify-between p-3.5 rounded-2xl ${idx === 0 ? 'bg-amber-500/20 border border-amber-500/40 text-amber-200' : 'bg-slate-900/60 border border-slate-800 text-slate-200'}">
+                    <div class="flex items-center gap-3">
+                        <span class="w-7 h-7 rounded-full ${idx === 0 ? 'bg-amber-400 text-slate-950 font-black' : 'bg-slate-800 text-slate-400 font-bold'} flex items-center justify-center text-xs">
+                            ${idx + 1}
+                        </span>
+                        <span class="font-bold text-sm">${escapeHtml(s.playerName || 'Cell Explorer')}</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="text-[10px] font-semibold px-2 py-0.5 rounded ${isCloud ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'}">
+                            ${isCloud ? 'Cloud' : 'Local'}
+                        </span>
+                        <span class="font-extrabold text-amber-400 text-sm md:text-base">${s.score || 0} pts</span>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+        window.renderLocalLeaderboard = function() {
+            const localScores = JSON.parse(localStorage.getItem('mitosis_local_scores') || '[]');
+            const currentRoom = window.roomId || 'global';
+            
+            const roomScores = localScores
+                .filter(s => (s.roomId || 'global') === currentRoom)
+                .sort((a, b) => (b.score || 0) - (a.score || 0));
+
+            window.renderLeaderboardUI(roomScores, false);
+        };
+
+        window.updateScore = function(points) {
+            score += points;
+            if (score < 0) score = 0;
+            if (points > 0) streak++;
+            else streak = 0;
+            
+            localStorage.setItem('mitosis_saved_score', score);
+            updateScoreUI();
+
+            if (typeof window.savePlayerScore === 'function') {
+                window.savePlayerScore(playerName, score);
+            }
+        };
+
+        function updateScoreUI() {
+            const scoreEl = document.getElementById('stat-score');
+            const streakEl = document.getElementById('stat-streak');
+            if (scoreEl) scoreEl.innerText = score;
+            if (streakEl) streakEl.innerText = streak;
+        }
+
+        window.showToast = function(message, type = "info") {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+
+            const toast = document.createElement('div');
+            toast.className = `toast-animate pointer-events-auto px-4 py-3 rounded-2xl text-xs md:text-sm font-bold text-white shadow-xl flex items-center gap-2 border ${
+                type === 'success' ? 'bg-emerald-600 border-emerald-400' :
+                type === 'error' ? 'bg-rose-600 border-rose-400' :
+                'bg-slate-800 border-slate-600'
+            }`;
+            
+            toast.innerHTML = `
+                <i class="fa-solid ${type === 'success' ? 'fa-circle-check' : type === 'error' ? 'fa-triangle-exclamation' : 'fa-circle-info'} text-base"></i>
+                <span>${message}</span>
+            `;
+
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3500);
+        };
+
+        window.promptPlayerName = function() {
+            const input = prompt("Enter your Player Name for the Leaderboard:", playerName);
+            if (input && input.trim()) {
+                playerName = input.trim().substring(0, 20);
+                localStorage.setItem('mitosis_player_name', playerName);
+                if (typeof window.savePlayerScore === 'function') {
+                    window.savePlayerScore(playerName, score);
+                }
+                window.showToast(`Updated player name to: ${playerName}`, "success");
+            }
+        };
+
+        window.switchTab = function(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('bg-indigo-600', 'text-white', 'shadow-lg', 'shadow-indigo-600/30');
+                btn.classList.add('text-slate-400', 'hover:text-slate-200', 'hover:bg-slate-800/50');
+            });
+
+            const targetTab = document.getElementById(`tab-${tabId}`);
+            if (targetTab) targetTab.classList.remove('hidden');
+            
+            const activeBtn = document.getElementById(`tab-btn-${tabId}`);
+            if (activeBtn) {
+                activeBtn.classList.add('bg-indigo-600', 'text-white', 'shadow-lg', 'shadow-indigo-600/30');
+                activeBtn.classList.remove('text-slate-400', 'hover:text-slate-200', 'hover:bg-slate-800/50');
+            }
+
+            if (tabId === 'leaderboard' && !window.isFirebaseConnected) {
+                window.renderLocalLeaderboard();
+            }
+        };
+
+        window.initSorterGame = function() {
+            const pool = document.getElementById('cards-pool');
+            if (!pool) return;
+            pool.innerHTML = '';
+            
+            document.querySelectorAll('.bucket-cards').forEach(b => b.innerHTML = '');
+
+            const shuffled = [...sorterCardsData].sort(() => Math.random() - 0.5);
+            const countEl = document.getElementById('cards-left-count');
+            if (countEl) countEl.innerText = shuffled.length;
+
+            shuffled.forEach(card => {
+                const cardEl = document.createElement('div');
+                cardEl.id = `card-${card.id}`;
+                cardEl.dataset.stage = card.stage;
+                cardEl.draggable = true;
+                cardEl.className = "draggable-card glass-card-light px-3 py-2 rounded-xl text-xs font-bold text-slate-800 shadow-md border border-slate-200 flex items-center gap-2 hover:border-indigo-400";
+                cardEl.innerHTML = `
+                    <i class="fa-solid ${card.icon} text-indigo-600"></i>
+                    <span>${card.text}</span>
+                `;
+
+                cardEl.addEventListener('dragstart', handleDragStart);
+                cardEl.addEventListener('dragend', handleDragEnd);
+                cardEl.addEventListener('click', () => handleCardClick(cardEl));
+
+                pool.appendChild(cardEl);
+            });
+
+            setupDropZones();
+        };
+
+        function handleDragStart(e) {
+            draggedCard = this;
+            this.classList.add('dragging');
+            e.dataTransfer.setData('text/plain', this.id);
+        }
+
+        function handleDragEnd() {
+            this.classList.remove('dragging');
+            draggedCard = null;
+        }
+
+        function setupDropZones() {
+            const dropZones = document.querySelectorAll('.drop-zone');
+            dropZones.forEach(zone => {
+                zone.addEventListener('dragover', e => {
+                    e.preventDefault();
+                    zone.classList.add('drag-over');
+                });
+
+                zone.addEventListener('dragleave', () => {
+                    zone.classList.remove('drag-over');
+                });
+
+                zone.addEventListener('drop', e => {
+                    e.preventDefault();
+                    zone.classList.remove('drag-over');
+                    if (draggedCard) {
+                        processCardPlacement(draggedCard, zone);
+                    }
+                });
+            });
+        }
+
+        function handleCardClick(cardEl) {
+            if (cardEl.parentElement.classList.contains('bucket-cards')) return;
+
+            const targetStage = cardEl.dataset.stage;
+            const zone = document.querySelector(`.drop-zone[data-stage="${targetStage}"]`);
+            if (zone) {
+                processCardPlacement(cardEl, zone);
+            }
+        }
+
+        function processCardPlacement(cardEl, zone) {
+            const targetStage = zone.dataset.stage;
+            const cardStage = cardEl.dataset.stage;
+
+            if (targetStage === cardStage) {
+                zone.querySelector('.bucket-cards').appendChild(cardEl);
+                cardEl.draggable = false;
+                cardEl.classList.remove('glass-card-light');
+                cardEl.classList.add('bg-emerald-500/20', 'text-emerald-200', 'border-emerald-400/50');
+                
+                updateScore(10);
+                triggerMiniConfetti(cardEl);
+
+                const remaining = document.getElementById('cards-pool').children.length;
+                document.getElementById('cards-left-count').innerText = remaining;
+
+                if (remaining === 0) {
+                    setTimeout(() => {
+                        triggerFullConfetti();
+                        window.showToast("🎉 Perfect! All event cards sorted correctly!", "success");
+                    }, 300);
+                }
+            } else {
+                updateScore(-2);
+                zone.classList.add('border-rose-500');
+                setTimeout(() => zone.classList.remove('border-rose-500'), 600);
+                window.showToast("Oops! That event belongs to a different stage.", "error");
+            }
+        }
+
+        window.resetSorterGame = function() {
+            initSorterGame();
+            window.showToast("Sorter cards reset!", "info");
+        };
+
+        window.initQuizGame = function() {
+            currentQuizIndex = 0;
+            document.getElementById('quiz-total-q').innerText = explorerQuizData.length;
+            renderQuizQuestion();
+        };
+
+        function renderQuizQuestion() {
+            const q = explorerQuizData[currentQuizIndex];
+            document.getElementById('quiz-curr-q').innerText = currentQuizIndex + 1;
+            document.getElementById('quiz-question-text').innerText = q.question;
+
+            renderCellSVG(q.svgType);
+
+            const container = document.getElementById('quiz-options-container');
+            container.innerHTML = '';
+
+            document.getElementById('quiz-feedback').classList.add('hidden');
+            document.getElementById('quiz-next-btn').classList.add('hidden');
+
+            q.options.forEach((opt, idx) => {
+                const btn = document.createElement('button');
+                btn.className = "quiz-opt-btn w-full p-3.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-left font-semibold text-slate-200 border border-slate-700 transition-all flex items-center justify-between text-xs md:text-sm";
+                btn.innerHTML = `
+                    <span>${opt}</span>
+                    <i class="fa-regular fa-circle text-slate-500"></i>
+                `;
+                btn.onclick = () => checkQuizAnswer(idx, q.correct, q.explanation);
+                container.appendChild(btn);
+            });
+        }
+
+        function renderCellSVG(stage) {
+            const display = document.getElementById('cell-svg-display');
+            let svgHTML = '';
+
+            switch(stage) {
+                case 'Interphase':
+                    svgHTML = `
+                        <svg viewBox="0 0 200 200" class="w-full h-full">
+                            <circle cx="100" cy="100" r="80" fill="#1e293b" stroke="#38bdf8" stroke-width="4" stroke-dasharray="6,6"/>
+                            <circle cx="100" cy="100" r="45" fill="#0284c7" fill-opacity="0.2" stroke="#38bdf8" stroke-width="2"/>
+                            <path d="M 80,90 Q 110,70 120,100 T 90,120 T 110,110" fill="none" stroke="#7dd3fc" stroke-width="3" stroke-linecap="round"/>
+                        </svg>`;
+                    break;
+                case 'Prophase':
+                    svgHTML = `
+                        <svg viewBox="0 0 200 200" class="w-full h-full">
+                            <circle cx="100" cy="100" r="80" fill="#1e293b" stroke="#c084fc" stroke-width="4"/>
+                            <circle cx="100" cy="100" r="45" fill="none" stroke="#c084fc" stroke-width="2" stroke-dasharray="4,4"/>
+                            <g>
+                                <path d="M 85,85 L 100,100 L 115,85 M 85,100 L 100,85 L 115,100" stroke="#f0abfc" stroke-width="4" stroke-linecap="round"/>
+                                <path d="M 85,115 L 100,130 L 115,115 M 85,130 L 100,115 L 115,130" stroke="#f0abfc" stroke-width="4" stroke-linecap="round"/>
+                            </g>
+                        </svg>`;
+                    break;
+                case 'Metaphase':
+                    svgHTML = `
+                        <svg viewBox="0 0 200 200" class="w-full h-full">
+                            <circle cx="100" cy="100" r="80" fill="#1e293b" stroke="#f472b6" stroke-width="4"/>
+                            <line x1="20" y1="100" x2="180" y2="100" stroke="#f472b6" stroke-opacity="0.4" stroke-width="2"/>
+                            <g>
+                                <path d="M 100,60 L 100,80 M 90,70 L 110,70" stroke="#fb7185" stroke-width="5" stroke-linecap="round"/>
+                                <path d="M 100,90 L 100,110 M 90,100 L 110,100" stroke="#fb7185" stroke-width="5" stroke-linecap="round"/>
+                                <path d="M 100,120 L 100,140 M 90,130 L 110,130" stroke="#fb7185" stroke-width="5" stroke-linecap="round"/>
+                            </g>
+                        </svg>`;
+                    break;
+                case 'Anaphase':
+                    svgHTML = `
+                        <svg viewBox="0 0 200 200" class="w-full h-full">
+                            <circle cx="100" cy="100" r="80" fill="#1e293b" stroke="#fbbf24" stroke-width="4"/>
+                            <g>
+                                <path d="M 50,70 L 40,80 L 50,90 M 50,110 L 40,120 L 50,130" stroke="#fde047" stroke-width="4" stroke-linecap="round"/>
+                                <path d="M 150,70 L 160,80 L 150,90 M 150,110 L 160,120 L 150,130" stroke="#fde047" stroke-width="4" stroke-linecap="round"/>
+                            </g>
+                        </svg>`;
+                    break;
+                case 'Telophase':
+                    svgHTML = `
+                        <svg viewBox="0 0 200 200" class="w-full h-full">
+                            <path d="M 100,20 C 130,20 170,50 170,100 C 170,150 130,180 100,180 C 70,180 30,150 30,100 C 30,50 70,20 100,20 Z" fill="#1e293b" stroke="#34d399" stroke-width="4"/>
+                            <circle cx="65" cy="100" r="25" fill="#059669" fill-opacity="0.3" stroke="#34d399" stroke-width="2"/>
+                            <circle cx="135" cy="100" r="25" fill="#059669" fill-opacity="0.3" stroke="#34d399" stroke-width="2"/>
+                        </svg>`;
+                    break;
+            }
+
+            display.innerHTML = svgHTML;
+        }
+
+        function checkQuizAnswer(selectedIndex, correctIndex, explanation) {
+            const btns = document.querySelectorAll('.quiz-opt-btn');
+            btns.forEach(btn => btn.disabled = true);
+
+            const feedback = document.getElementById('quiz-feedback');
+            const feedbackMsg = document.getElementById('quiz-feedback-msg');
+            const feedbackIcon = document.getElementById('quiz-feedback-icon');
+
+            if (selectedIndex === correctIndex) {
+                btns[selectedIndex].classList.add('bg-emerald-600', 'border-emerald-400', 'text-white');
+                feedback.className = "p-4 rounded-2xl text-xs md:text-sm font-semibold border flex items-center gap-3 bg-emerald-500/20 text-emerald-200 border-emerald-500/40";
+                feedbackIcon.className = "fa-solid fa-circle-check text-emerald-400 text-xl";
+                feedbackMsg.innerText = `Correct! ${explanation}`;
+                updateScore(15);
+            } else {
+                btns[selectedIndex].classList.add('bg-rose-600', 'border-rose-400', 'text-white');
+                btns[correctIndex].classList.add('bg-emerald-600/50', 'border-emerald-400');
+                feedback.className = "p-4 rounded-2xl text-xs md:text-sm font-semibold border flex items-center gap-3 bg-rose-500/20 text-rose-200 border-rose-500/40";
+                feedbackIcon.className = "fa-solid fa-circle-xmark text-rose-400 text-xl";
+                feedbackMsg.innerText = `Not quite. ${explanation}`;
+                updateScore(-5);
+            }
+
+            feedback.classList.remove('hidden');
+            document.getElementById('quiz-next-btn').classList.remove('hidden');
+        }
+
+        window.nextQuizQuestion = function() {
+            currentQuizIndex++;
+            if (currentQuizIndex < explorerQuizData.length) {
+                renderQuizQuestion();
+            } else {
+                triggerFullConfetti();
+                window.showToast("🎉 Fantastic! You completed the Cell Visual Quiz!", "success");
+                currentQuizIndex = 0;
+                renderQuizQuestion();
+            }
+        };
+
+        window.initSequenceGame = function() {
+            userSequence = [null, null, null, null, null];
+            renderSequenceSlots();
+            renderSequencePool();
+            updateOrganismProgress(0);
+        };
+
+        function renderSequenceSlots() {
+            const container = document.getElementById('sequence-slots');
+            if (!container) return;
+            container.innerHTML = '';
+
+            for (let i = 0; i < 5; i++) {
+                const slot = document.createElement('div');
+                slot.className = "glass-card p-3 rounded-2xl border-2 border-dashed border-indigo-400/30 flex flex-col items-center justify-center min-h-[85px] relative";
+                
+                if (userSequence[i]) {
+                    slot.innerHTML = `
+                        <span class="text-[10px] text-indigo-300 font-bold mb-1">Step ${i+1}</span>
+                        <div class="px-3 py-1.5 bg-indigo-600 rounded-xl text-white font-bold text-xs md:text-sm shadow-md flex items-center gap-2">
+                            <span>${userSequence[i]}</span>
+                            <button onclick="removeFromSequence(${i})" class="hover:text-rose-300 font-bold">&times;</button>
+                        </div>
+                    `;
+                } else {
+                    slot.innerHTML = `
+                        <span class="text-[10px] text-slate-500 font-bold mb-1">Step ${i+1}</span>
+                        <span class="text-xs text-slate-600">Empty Slot</span>
+                    `;
+                }
+
+                container.appendChild(slot);
+            }
+        }
+
+        function renderSequencePool() {
+            const pool = document.getElementById('sequence-pool');
+            if (!pool) return;
+            pool.innerHTML = '';
+
+            const available = correctSequence.filter(stage => !userSequence.includes(stage)).sort(() => Math.random() - 0.5);
+
+            available.forEach(stage => {
+                const btn = document.createElement('button');
+                btn.className = "px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-200 font-bold text-xs md:text-sm border border-slate-600 shadow-md transition-all";
+                btn.innerText = stage;
+                btn.onclick = () => addToSequence(stage);
+                pool.appendChild(btn);
+            });
+        }
+
+        function addToSequence(stage) {
+            const emptyIdx = userSequence.indexOf(null);
+            if (emptyIdx !== -1) {
+                userSequence[emptyIdx] = stage;
+                renderSequenceSlots();
+                renderSequencePool();
+            }
+        }
+
+        window.removeFromSequence = function(idx) {
+            userSequence[idx] = null;
+            renderSequenceSlots();
+            renderSequencePool();
+        };
+
+        window.checkSequence = function() {
+            let isCorrect = true;
+            for (let i = 0; i < 5; i++) {
+                if (userSequence[i] !== correctSequence[i]) {
+                    isCorrect = false;
+                    break;
+                }
+            }
+
+            if (isCorrect) {
+                updateScore(25);
+                updateOrganismProgress(5);
+                triggerFullConfetti();
+                document.getElementById('organism-status-msg').innerText = "✨ Perfect Sequence! The single cell divided into tissues, organs, and a fully formed organism!";
+                window.showToast("✨ Perfect Sequence Order!", "success");
+            } else {
+                updateScore(-5);
+                window.showToast("Incorrect order! Remember PMAT + Interphase.", "error");
+            }
+        };
+
+        window.resetSequence = function() {
+            initSequenceGame();
+            window.showToast("Sequence reset!", "info");
+        };
+
+        function updateOrganismProgress(level) {
+            for (let i = 1; i <= 5; i++) {
+                const el = document.getElementById(`org-stage-${i}`);
+                if (el) {
+                    if (i <= level) {
+                        el.classList.remove('opacity-30');
+                        el.classList.add('scale-125', 'opacity-100');
+                    } else {
+                        el.classList.add('opacity-30');
+                        el.classList.remove('scale-125', 'opacity-100');
+                    }
+                }
+            }
+        }
+
+        window.openModal = function(id) {
+            const modal = document.getElementById(id);
+            if (modal) {
+                modal.classList.remove('hidden');
+                if (id === 'share-modal') {
+                    renderQRCode();
+                }
+            }
+        };
+
+        window.closeModal = function(id) {
+            const modal = document.getElementById(id);
+            if (modal) modal.classList.add('hidden');
+        };
+
+        window.setCustomRoomCode = function() {
+            const input = document.getElementById('custom-room-input');
+            if (input && input.value.trim()) {
+                const code = input.value.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+                window.roomId = code;
+                localStorage.setItem('mitosis_last_room', code);
+                
+                const shareUrl = `${window.location.origin}${window.location.pathname}?room=${code}`;
+                window.history.replaceState({}, '', shareUrl);
+
+                document.getElementById('room-info-banner').classList.remove('hidden');
+                document.getElementById('room-code-display').innerText = code;
+
+                renderQRCode();
+                window.showToast(`Switched room to: ${code}`, "success");
+            }
+        };
+
+        window.leaveRoom = function() {
+            window.roomId = 'global';
+            localStorage.setItem('mitosis_last_room', 'global');
+            window.history.replaceState({}, '', window.location.pathname);
+            document.getElementById('room-info-banner').classList.add('hidden');
+            window.showToast("Exited challenge room back to global leaderboard.", "info");
+        };
+
+        function renderQRCode() {
+            const container = document.getElementById('qr-code-container');
+            if (!container) return;
+
+            const targetUrl = window.location.href;
+            
+            // Clean lightweight SVG QR Representation
+            container.innerHTML = `
+                <div class="flex flex-col items-center gap-2">
+                    <svg class="w-32 h-32" viewBox="0 0 100 100">
+                        <rect width="100" height="100" fill="#ffffff" />
+                        <g fill="#0f172a">
+                            <!-- Outer Position Markers -->
+                            <rect x="5" y="5" width="25" height="25" fill="none" stroke="#0f172a" stroke-width="4"/>
+                            <rect x="10" y="10" width="15" height="15" />
+                            <rect x="70" y="5" width="25" height="25" fill="none" stroke="#0f172a" stroke-width="4"/>
+                            <rect x="75" y="10" width="15" height="15" />
+                            <rect x="5" y="70" width="25" height="25" fill="none" stroke="#0f172a" stroke-width="4"/>
+                            <rect x="10" y="75" width="15" height="15" />
+                            
+                            <!-- Stylized Data Patterns -->
+                            <rect x="35" y="10" width="5" height="15" />
+                            <rect x="45" y="5" width="10" height="10" />
+                            <rect x="10" y="35" width="15" height="5" />
+                            <rect x="35" y="35" width="30" height="30" rx="3" />
+                            <rect x="70" y="40" width="15" height="10" />
+                            <rect x="40" y="75" width="20" height="15" />
+                            <rect x="75" y="70" width="15" height="20" />
+                        </g>
+                    </svg>
+                    <span class="text-[10px] font-bold text-slate-500 break-all text-center max-w-[200px]">${targetUrl}</span>
+                </div>
+            `;
+        }
+
+        window.copyShareUrl = function() {
+            const shareUrl = window.location.href;
+            const dummy = document.createElement('input');
+            document.body.appendChild(dummy);
+            dummy.value = shareUrl;
+            dummy.select();
+            document.execCommand('copy');
+            document.body.removeChild(dummy);
+
+            window.showToast("Shareable link copied to clipboard!", "success");
+        };
+
+        window.downloadGameFile = function() {
+            const htmlContent = "<!DOCTYPE html>\n" + document.documentElement.outerHTML;
+            const blob = new Blob([htmlContent], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `Mitosis_Master_Offline_Game_${window.roomId || 'global'}.html`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            window.showToast("Standalone HTML game downloaded!", "success");
+        };
+
+        window.exportClassResultsCSV = function() {
+            const localScores = JSON.parse(localStorage.getItem('mitosis_local_scores') || '[]');
+            if (localScores.length === 0) {
+                window.showToast("No local student scores recorded yet.", "info");
+                return;
+            }
+
+            let csv = "Student Name,Room Code,Score,Timestamp\n";
+            localScores.forEach(s => {
+                csv += `"${s.playerName}","${s.roomId}",${s.score},"${s.updatedAt}"\n`;
+            });
+
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `Mitosis_Class_Results_${window.roomId || 'global'}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            window.showToast("Exported student results to CSV!", "success");
+        };
+
+        window.exportStudentCertificate = function() {
+            document.getElementById('cert-student-name').innerText = playerName;
+            document.getElementById('cert-score').innerText = score;
+            document.getElementById('cert-room').innerText = window.roomId || 'global';
+            document.getElementById('cert-date').innerText = new Date().toLocaleDateString();
+
+            window.print();
+        };
+
+        function escapeHtml(text) {
+            return String(text).replace(/[&<>"']/g, function(m) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
+            });
+        }
+
+        function triggerMiniConfetti(el) {
+            if (typeof confetti === 'function') {
+                const rect = el.getBoundingClientRect();
+                confetti({
+                    particleCount: 20,
+                    spread: 40,
+                    origin: {
+                        x: (rect.left + rect.width / 2) / window.innerWidth,
+                        y: (rect.top + rect.height / 2) / window.innerHeight
+                    }
+                });
+            }
+        }
+
+        function triggerFullConfetti() {
+            if (typeof confetti === 'function') {
+                confetti({
+                    particleCount: 100,
+                    spread: 70,
+                    origin: { y: 0.6 }
+                });
+            }
+        }
+
+        window.addEventListener('load', () => {
+            initSorterGame();
+            initQuizGame();
+            initSequenceGame();
+            updateScoreUI();
+        });
+    </script>
+</body>
+</html>
